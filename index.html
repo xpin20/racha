@@ -33,7 +33,9 @@
   --accent:#FF7650; --accent-ink:#1A0F0B; --good:#4CC584; --warn:#E9A84A; --shadow:none; color-scheme:dark}
 
 *{box-sizing:border-box}
-html{padding-top:env(safe-area-inset-top,0px)}
+html{padding-top:env(safe-area-inset-top,0px);touch-action:manipulation}
+*{touch-action:manipulation}
+button,.sq,.ringbtn,.day{-webkit-user-select:none;user-select:none}
 body{margin:0;overscroll-behavior-y:none}
 html,body{height:100%}
 body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.45;-webkit-tap-highlight-color:transparent}
@@ -305,21 +307,111 @@ function metaText(h, k){
 }
 
 /* ---------- acciones ---------- */
+/* ---------- sonidos ---------- */
+let actx = null;
+function tone(notes){
+  if (S.settings && S.settings.sound === false) return;
+  try {
+    actx ||= new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === 'suspended') actx.resume();
+    let t = actx.currentTime + 0.01;
+    notes.forEach(([f0, f1, dur]) => {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(f0, t);
+      o.frequency.exponentialRampToValueAtTime(f1, t + dur * 0.7);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.28, t + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g); g.connect(actx.destination);
+      o.start(t); o.stop(t + dur + 0.02);
+      t += dur * 0.75;
+    });
+  } catch (e) {}
+}
+const sndUp = () => tone([[620, 940, 0.16]]);
+const sndDown = () => tone([[520, 300, 0.18]]);
+const sndDone = () => tone([[523, 523, 0.13], [659, 659, 0.13], [784, 1046, 0.28]]);
+
 function setVal(h, k, v){ (S.log[h.id] ||= {}); if (v <= 0) delete S.log[h.id][k]; else S.log[h.id][k] = v; }
 function tap(id){
   const h = S.habits.find(x => x.id === id); if (!h) return;
   const v = val(h, sel);
   if (h.type === 'timer' && !h.bad) return openTimer(h);
-  if (h.bad) { setVal(h, sel, v + 1); commit(); toast(`Recaída anotada en ${h.name}`); return; }
+  if (h.bad) { setVal(h, sel, v + 1); sndDown(); commit(); toast(`Recaída anotada en ${h.name}`); return; }
   if (h.type === 'check') setVal(h, sel, v ? 0 : 1);
   else setVal(h, sel, v + (h.step || 1));
   const wasDone = v >= target(h);
   commit();
-  if (!wasDone && done(h, sel)) { const s = streak(h); toast(s > 1 && sel === today() ? `${h.name}: racha de ${s} días` : `${h.name}: completado`); }
+  if (!wasDone && done(h, sel)) { sndDone(); const s = streak(h); toast(s > 1 && sel === today() ? `${h.name}: racha de ${s} días` : `${h.name}: completado`); }
+  else if (h.type === 'check' && v) sndDown();
+  else sndUp();
 }
 function minus(id){
   const h = S.habits.find(x => x.id === id); if (!h) return;
-  setVal(h, sel, val(h, sel) - (h.bad ? 1 : (h.step || 1))); commit();
+  setVal(h, sel, val(h, sel) - (h.bad ? 1 : (h.step || 1)));
+  if (h.bad) sndUp(); else sndDown();
+  commit();
+}
+
+/* ---------- gráfica por hábito ---------- */
+function habitChart(h, n){
+  const W = 320, H = 180, L = 34, R = 6, B = 22, T = 14, iw = W - L - R, ih = H - B - T;
+  const conv = v => h.type === 'timer' ? Math.round(v / 6) / 10 : v;
+  const goal = h.bad ? h.goal : conv(target(h));
+  const days = []; for (let i = n - 1; i >= 0; i--) days.push(addDays(today(), -i));
+  const vals = days.map(k => conv(val(h, k)));
+  const ymax = Math.max(goal, 1, ...vals) * 1.08;
+  const y = v => T + ih * (1 - v / ymax);
+  const bw = iw / n, unit = h.type === 'timer' ? 'min' : h.type === 'check' && !h.bad ? '' : (h.unit || (h.bad ? 'recaídas' : ''));
+  let g = `<line x1="${L}" x2="${W - R}" y1="${y(0)}" y2="${y(0)}" stroke="var(--line)"/>`;
+  g += `<text x="${L - 6}" y="${y(0) + 3.5}" text-anchor="end">0</text>`;
+  if (h.type !== 'check' || h.bad) {
+    const top = Math.round(ymax / 1.08 * 10) / 10;
+    if (goal > 0) g += `<line x1="${L}" x2="${W - R}" y1="${y(goal)}" y2="${y(goal)}" stroke="var(--ink)" stroke-dasharray="4 4" opacity=".55"/><text x="${L - 6}" y="${y(goal) + 3.5}" text-anchor="end">${goal}</text>`;
+    if (top > goal * 1.25) g += `<line x1="${L}" x2="${W - R}" y1="${y(top)}" y2="${y(top)}" stroke="var(--line)" opacity=".7"/><text x="${L - 6}" y="${y(top) + 3.5}" text-anchor="end">${top}</text>`;
+  }
+  if (unit) g += `<text x="${L}" y="9">${esc(unit)}</text>`;
+  days.forEach((k, i) => {
+    if (k < h.created) return;
+    const v = vals[i], x = L + i * bw + bw * 0.16, w = Math.max(1.5, bw * 0.68);
+    const s = sched(h, k);
+    let fill = h.color, op = 1;
+    if (h.bad) { fill = v > h.goal ? 'var(--accent)' : h.color; }
+    else if (!done(h, k)) op = 0.45;
+    if (!s) op = 0.25;
+    if (v <= 0) { g += `<rect x="${x}" y="${y(0) - 2}" width="${w}" height="2" rx="1" fill="var(--sunk)"/>`; return; }
+    const top = h.type === 'check' && !h.bad ? y(1) : y(v);
+    g += `<rect x="${x}" y="${top}" width="${w}" height="${Math.max(2, y(0) - top)}" rx="${Math.min(3, w / 2)}" fill="${fill}" opacity="${op}"${k === today() ? ' stroke="var(--ink)" stroke-width="1"' : ''}/>`;
+  });
+  [0, Math.floor((n - 1) / 2), n - 1].forEach((i, j) => {
+    const d = parse(days[i]), x = L + i * bw + bw / 2;
+    g += `<text x="${x}" y="${H - 6}" text-anchor="${j === 0 ? 'start' : j === 2 ? 'end' : 'middle'}">${d.getDate()} ${MON[d.getMonth()]}</text>`;
+  });
+  const real = days.filter(k => k >= h.created && sched(h, k));
+  const sum = real.reduce((a, k) => a + conv(val(h, k)), 0);
+  const okDays = real.filter(k => done(h, k) && (k !== today() || done(h, k))).length;
+  let foot = '';
+  if (h.bad) foot = `${real.filter(k => val(h, k) <= h.goal).length} de ${real.length} días limpios en este periodo`;
+  else if (h.type === 'check') foot = `${okDays} de ${real.length} días cumplidos en este periodo`;
+  else foot = `Promedio: ${real.length ? (Math.round(sum / real.length * 10) / 10).toLocaleString('es-MX') : 0} ${unit} por día · meta ${goal} ${unit}`;
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Valores diarios de ${esc(h.name)} en los últimos ${n} días">${g}</svg><p class="note">${foot}</p>`;
+}
+function openDetail(h){
+  const t = totals(h), r = rate(h, 30);
+  sheet(`<div class="sheethead"><h2>${esc(h.icon)} ${esc(h.name)}</h2><button class="btn" data-close="1">Cerrar</button></div>
+    <div class="kpis" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+      <div class="kpi"><b>${streak(h)}</b><span>Racha actual (días)</span></div>
+      <div class="kpi"><b>${best(h)}</b><span>Mejor racha</span></div>
+      <div class="kpi"><b>${t.done}</b><span>${h.bad ? 'Días limpios' : 'Días completados'}</span></div>
+      <div class="kpi"><b>${r == null ? '—' : Math.round(r * 100) + '%'}</b><span>Cumplimiento 30 días</span></div>
+    </div>
+    <div class="card" style="margin-top:12px;--hc:${h.color}">
+      <div class="seg" style="margin-bottom:12px">${[7, 30, 90].map(n => `<button data-range="${n}" data-hid="${h.id}" aria-pressed="${n === 30}">${n} días</button>`).join('')}</div>
+      <div id="hchart">${habitChart(h, 30)}</div>
+    </div>
+    <div class="card" style="margin-top:12px"><div class="eyebrow" style="margin-bottom:8px">Últimas 17 semanas</div><div class="heat">${heatmap(h)}</div></div>
+    <div class="actions" style="margin-top:12px"><button class="btn" data-edit="${h.id}">Editar hábito</button></div>`);
 }
 
 /* ---------- render ---------- */
@@ -396,7 +488,7 @@ function card(h){
   else ctrl = `<button class="sq main" data-tap="${h.id}" aria-label="Abrir temporizador">${playI}</button>`;
   return `<article class="habit ${ok ? 'done' : ''}" style="--hc:${h.color}">
     <button class="ringbtn" data-tap="${h.id}" aria-label="${esc(h.name)}">${ring(p, h.color)}<span class="ic">${ok && !h.bad ? checkI : esc(h.icon)}</span></button>
-    <button class="info" data-edit="${h.id}"><span class="name">${esc(h.name)}</span>
+    <button class="info" data-detail="${h.id}"><span class="name">${esc(h.name)}</span>
       <span class="meta"><span>${metaText(h, sel)}</span>${s ? `<span class="st">${flame}${s} ${s === 1 ? 'día' : 'días'}</span>` : ''}${h.bad ? '<span class="pill bad">Dejar</span>' : ''}${late ? `<span class="pill">${h.reminder}</span>` : ''}</span></button>
     <div class="ctrl">${ctrl}</div></article>`;
 }
@@ -521,6 +613,7 @@ function viewSettings(){
     </div>
     ${arch.length ? `<div class="card"><div class="eyebrow" style="margin-bottom:4px">Archivados</div>${arch.map(h => `<div class="row"><div><b>${esc(h.icon)} ${esc(h.name)}</b></div><button class="btn" data-unarch="${h.id}">Restaurar</button></div>`).join('')}</div>` : ''}
     <div class="card">
+      <div class="row"><div><b>Sonidos</b><p>Suena al sumar, restar o completar un hábito. Si el iPhone está en silencio, no se escuchan.</p></div><button class="tog" role="switch" aria-checked="${S.settings?.sound !== false}" data-sound="1" aria-label="Sonidos"></button></div>
       <div class="row"><div><b>Recordatorios</b><p>Cada hábito puede tener una hora. Cuando pasa y no lo has hecho, la tarjeta se marca con esa hora. Esta versión no manda notificaciones push al teléfono.</p></div></div>
       <div class="row"><div><b>Borrar todo</b><p>Elimina hábitos e historial. No se puede deshacer.</p></div><button class="btn danger" data-wipe="1">Borrar</button></div>
       <div id="wipebox"></div>
@@ -632,6 +725,9 @@ document.addEventListener('click', async e => {
   if (ds.filter) { filter = ds.filter; render(); return; }
   if (ds.tap) return tap(ds.tap);
   if (ds.minus) return minus(ds.minus);
+  if (ds.detail) return openDetail(S.habits.find(h => h.id === ds.detail));
+  if (ds.range) { const h = S.habits.find(x => x.id === ds.hid); document.querySelectorAll('[data-range]').forEach(x => x.setAttribute('aria-pressed', x === b)); $('#hchart').innerHTML = habitChart(h, +ds.range); return; }
+  if (ds.sound) { S.settings ||= {}; S.settings.sound = S.settings.sound === false; commit(); if (S.settings.sound) sndUp(); return; }
   if (ds.edit) return openEdit(S.habits.find(h => h.id === ds.edit));
   if (ds.tpl) return openEdit(null, JSON.parse(JSON.stringify(TEMPLATES[+ds.tpl])));
   if (ds.new || b.id === 'fab') return openEdit(null);
@@ -651,7 +747,7 @@ document.addEventListener('click', async e => {
   if (ds.tplay) return toggleTimer();
   if (ds.treset) { if (tm) { tm.acc = 0; tm.t0 = Date.now(); tickTimer(); } return; }
   if (ds.tadd) { if (tm) { tm.acc += +ds.tadd; tickTimer(); } return; }
-  if (ds.tsave) { const e2 = elapsed(), h = tm.h; if (e2 > 0) { setVal(h, sel, val(h, sel) + e2); } closeSheet(); commit(); toast(e2 ? `${Math.round(e2/60)} min guardados en ${h.name}` : 'Sin tiempo que guardar'); return; }
+  if (ds.tsave) { const e2 = elapsed(), h = tm.h, was = done(h, sel); if (e2 > 0) { setVal(h, sel, val(h, sel) + e2); (!was && done(h, sel)) ? sndDone() : sndUp(); } closeSheet(); commit(); toast(e2 ? `${Math.round(e2/60)} min guardados en ${h.name}` : 'Sin tiempo que guardar'); return; }
   // ajustes
   if (ds.unarch) { S.habits.find(h => h.id === ds.unarch).archived = false; commit(); return; }
   if (ds.export) return exportData();
